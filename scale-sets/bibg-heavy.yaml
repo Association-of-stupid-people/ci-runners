@@ -1,0 +1,92 @@
+# Runner scale set `bibg-heavy`: heavy builds (Rust/C++, large images). One job at a time; Docker data is kept across jobs.
+# Install/upgrade with install.sh on the runner host.
+githubConfigUrl: https://github.com/Association-of-stupid-people
+githubConfigSecret: arc-github
+runnerScaleSetName: bibg-heavy
+minRunners: 0
+maxRunners: 1
+
+template:
+  spec:
+    terminationGracePeriodSeconds: 120
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+      # Native sidecar: the runner starts only after `docker info` succeeds. Every container a job starts
+      # (job container, services, image builds) runs inside this daemon, so its limits bound the whole job.
+      - name: dind
+        image: docker:29-dind
+        restartPolicy: Always
+        # /var/lib/docker is a host dir kept across jobs (images, build cache, cargo volumes). An ephemeral pod
+        # can start while the previous one is still stopping; flock keeps two daemons off the same data dir.
+        command: ["flock", "/var/lib/docker/.arc.lock", "dockerd-entrypoint.sh"]
+        # Pod network (flannel) has MTU 1450; Docker's bridges default to 1500, so large packets from job
+        # containers (e.g. git fetch) are dropped and connections reset. Match the pod MTU on every network.
+        args: ["dockerd", "--host=unix:///var/run/docker.sock", "--group=123", "--mtu=1450",
+               "--default-network-opt=bridge=com.docker.network.driver.mtu=1450"]
+        securityContext:
+          privileged: true
+        resources:
+          # request = limit so node memory pressure never evicts a build mid-compile.
+          requests: { cpu: "2", memory: 8Gi }
+          limits: { cpu: "10", memory: 8Gi }
+        # Before the runner starts, drop containers/networks a hard-killed previous job left behind
+        # (leaked networks would exhaust Docker's address pools); named volumes are kept.
+        startupProbe:
+          exec:
+            command: ["sh", "-c", "docker info >/dev/null && docker container prune -f && docker network prune -f"]
+          failureThreshold: 60
+          periodSeconds: 5
+          timeoutSeconds: 60
+        lifecycle:
+          preStop:
+            exec:
+              # flock is PID 1 and ignores SIGTERM: stop dockerd cleanly so the data dir is never left mid-write.
+              command: ["sh", "-c", "kill -TERM $(cat /var/run/docker.pid) 2>/dev/null; while [ -e /var/run/docker.pid ]; do sleep 1; done"]
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+          - name: docker-data
+            mountPath: /var/lib/docker
+          - name: docker-config
+            mountPath: /etc/docker/daemon.json
+            subPath: daemon.json
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits: { cpu: "1", memory: 1Gi }
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+      - name: docker-data
+        hostPath:
+          path: /var/lib/bibg-ci/heavy-docker
+          type: DirectoryOrCreate
+      - name: docker-config
+        configMap:
+          name: bibg-heavy-docker
