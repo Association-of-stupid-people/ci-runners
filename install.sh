@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs/updates every runner scale set in scale-sets/ (release name = file name). Run after bootstrap.sh.
 # Usage: sudo bash install.sh    (asks for the GitHub PAT when the secret is missing)
-#        GH_PAT=... sudo -E bash install.sh    (without a terminal, or to replace the token)
+#        GH_PAT=... sudo -E bash install.sh    (automation / replacing the token; lands in shell history)
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./versions.env

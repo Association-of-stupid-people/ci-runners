@@ -11,13 +11,16 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 # Flags live in config.yaml (not INSTALL_K3S_EXEC) so a later installer run for an upgrade keeps them.
 # Runners need no ingress or load balancer; system-reserved keeps the host responsive when CI fills it.
 install -d /etc/rancher/k3s
-cat > /etc/rancher/k3s/config.yaml <<'EOF'
-disable:
+k3s_config='disable:
   - traefik
   - servicelb
 kubelet-arg:
-  - system-reserved=cpu=500m,memory=1Gi
-EOF
+  - system-reserved=cpu=500m,memory=1Gi'
+if [ ! -e /etc/rancher/k3s/config.yaml ]; then
+  printf '%s\n' "$k3s_config" > /etc/rancher/k3s/config.yaml
+elif ! printf '%s\n' "$k3s_config" | cmp -s - /etc/rancher/k3s/config.yaml; then
+  echo "note: /etc/rancher/k3s/config.yaml differs from bootstrap.sh's default, left as is" >&2
+fi
 if ! command -v k3s >/dev/null; then
   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" sh -
 fi

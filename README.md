@@ -28,8 +28,13 @@ sudo bash install.sh     # scale sets; asks for the GitHub PAT the first time
 ```
 
 The PAT is a classic token with `admin:org`, from an org owner. It is stored only in the k8s
-secret `arc-github` (namespace `arc-runners`). Never commit it. Without a terminal (e.g. `ssh host cmd`),
-pass it as `GH_PAT=... sudo -E bash install.sh`.
+secret `arc-github` (namespace `arc-runners`). Never commit it. Over ssh, give the prompt a terminal:
+`ssh -t <host> 'cd ci-runners && sudo bash install.sh'`. `GH_PAT=... sudo -E bash install.sh` is for
+automation only (the token lands in shell history).
+
+`helm`/`kubectl` without sudo use the `~/.kube/config` that `bootstrap.sh` copies for the invoking user,
+via `KUBECONFIG` in `~/.bashrc` (open a new shell or `source ~/.bashrc` after bootstrap);
+`sudo helm` has no kubeconfig.
 
 ## Use in a workflow
 
@@ -70,23 +75,27 @@ kubectl -n arc-systems delete pod -l app.kubernetes.io/component=runner-scale-se
 equal to it) and the limits, run `install.sh`. Every `*.yaml` in that folder becomes a live scale set.
 Keep the sum of memory limits within the host.
 
-**Remove a scale set:** delete its file, then `sudo helm uninstall <name> -n arc-runners`.
+**Remove a scale set:** delete its file, then `helm uninstall <name> -n arc-runners`.
 
 **Upgrade ARC** (helm never upgrades CRDs, so the controller is reinstalled): wait until no job is
 running, then
 
 ```bash
-for s in scale-sets/*.yaml; do sudo helm uninstall "$(basename "$s" .yaml)" -n arc-runners --wait; done
-sudo helm uninstall arc -n arc-systems --wait
-sudo kubectl get crd -o name | grep actions.github.com | xargs sudo kubectl delete
-# set ARC_VERSION in versions.env, then
-sudo bash bootstrap.sh && sudo bash install.sh
+(
+  set -e   # stop at the first failure: CRDs must not be deleted while ARC is still installed
+  for s in scale-sets/*.yaml; do helm uninstall "$(basename "$s" .yaml)" -n arc-runners --wait --ignore-not-found; done
+  helm uninstall arc -n arc-systems --wait --ignore-not-found
+  kubectl get crd -o name | grep actions.github.com | xargs -r kubectl delete
+)
 ```
+
+Then set `ARC_VERSION` in `versions.env` and run `sudo bash bootstrap.sh && sudo bash install.sh`.
 
 **Upgrade k3s:** set `K3S_VERSION` in `versions.env`, then
 `curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION=<version> sh -` (flags come from
-`/etc/rancher/k3s/config.yaml`, written by `bootstrap.sh`). `bootstrap.sh` itself never upgrades an
-installed k3s or helm.
+`/etc/rancher/k3s/config.yaml`, written by `bootstrap.sh`; on a host set up before that file existed,
+run `sudo bash bootstrap.sh` once first or the installer drops the flags). `bootstrap.sh` itself never
+upgrades an installed k3s or helm.
 
 **Uninstall everything:** `sudo /usr/local/bin/k3s-uninstall.sh && sudo rm -rf /var/lib/bibg-ci`.
 
