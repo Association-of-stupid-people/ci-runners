@@ -1,6 +1,5 @@
 # Runner scale set `bibg-heavy`: heavy builds (Rust/C++, large images). One job at a time; Docker data is kept across jobs.
 # Install/upgrade with install.sh on the runner host.
-githubConfigUrl: https://github.com/Association-of-stupid-people
 githubConfigSecret: arc-github
 runnerScaleSetName: bibg-heavy
 minRunners: 0

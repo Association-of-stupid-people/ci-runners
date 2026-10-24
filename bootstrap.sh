@@ -53,4 +53,3 @@ fi
 helm upgrade --install arc --namespace arc-systems --create-namespace --version "$ARC_VERSION" --wait \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
 kubectl -n arc-systems get pods
-echo "Next: sudo bash install.sh"

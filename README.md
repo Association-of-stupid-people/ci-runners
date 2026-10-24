@@ -1,18 +1,37 @@
 # ci-runners
 
-Self-hosted GitHub Actions runners for the `Association-of-stupid-people` org: a single-node
-[k3s](https://k3s.io) cluster running [Actions Runner Controller](https://github.com/actions/actions-runner-controller)
-(ARC) runner scale sets. Runners are registered at the **org** level, so any repo in the org that is
-allowed by the runner group can use them.
+Self-hosted GitHub Actions runners: a single-node [k3s](https://k3s.io) cluster running
+[Actions Runner Controller](https://github.com/actions/actions-runner-controller) (ARC) runner scale sets,
+registered at the org (or repo) set in `config.env`. Any repo the org's runner group allows can use them.
 
-| Scale set | Max jobs | Limits (per pod) | Docker data | Use for |
-|---|---|---|---|---|
-| `bibg-heavy` | 1 | dind 10 CPU / 8 GiB | kept across jobs (`/var/lib/bibg-ci/heavy-docker`) | BIBGSystem only (Rust build, backend image) |
-| `bibg-light` | 2 | dind 3 CPU / 2.5 GiB, runner 3 CPU / 3 GiB | fresh every job | any repo |
+| Scale set | Resources per job | Docker data | Use for |
+|---|---|---|---|
+| `ci-2c-2g`, `ci-4c-4g`, `ci-4c-8g`, `ci-8c-8g` | the cores / GiB in the name, reserved and capped | fresh every job (pod evicted if workspace > 10 GiB or Docker data > 30 GiB) | any repo: pick the size the job needs |
+| `bibg-heavy` | reserves ~8.25 GiB, may use up to 9 GiB, max 1 | kept across jobs (`/var/lib/bibg-ci/heavy-docker`) | BIBGSystem only (Rust build, backend image) |
+| `bibg-light` | reserves 1 GiB, may use up to 5.5 GiB, max 2 | fresh every job | BIBGSystem |
 
 Each job pod has its own Docker daemon (dind), so `container:` jobs, `services:` and `docker build` work.
 
-**Other repos use `bibg-light`.** `bibg-heavy` keeps images, build cache and volumes between jobs and
+### How sizes share the machine
+
+A `ci-<C>c-<G>g` pod gets exactly C cores and G GiB (shared by the runner and its Docker daemon), like a
+hosted runner size. Kubernetes starts a job pod only where those cores and that memory are free, so the same
+machine is used as needed: 8 cores / 8 GiB free runs 4 x `ci-2c-2g`, 2 x `ci-4c-4g`, 1 x `ci-8c-8g` or a mix
+(1 x `ci-4c-4g` + 2 x `ci-2c-2g`). A job that does not fit waits in the queue (its pod stays Pending) and
+starts when resources free up. `maxRunners` of each size is how many fit in the whole node.
+
+Choose the sizes with `CI_SIZES` in `config.env` (`<cores>c<GiB>g`, e.g. `CI_SIZES="2c2g 4c8g"`), then run
+`install.sh`. Sizes that do not fit the node are skipped with a message.
+
+Limits of the packing:
+- A waiting big job does not reserve resources: smaller jobs that fit keep starting, so a steady stream of
+  small jobs can delay a big one. On a 16 GiB host `ci-8c-8g` cannot start while `bibg-heavy` runs.
+- `ci-*` pods are Guaranteed: they never use more than they reserve, and when RAM runs out the kernel kills
+  processes of the bursting `bibg-*` pods (which reserve less than they may use) first.
+- A job over its memory is OOM-killed inside its own pod; the victim may be the runner or Docker rather
+  than the build, so the job can fail as "runner lost" instead of exit code 137.
+
+**Other repos use `ci-*`.** `bibg-heavy` keeps images, build cache and volumes between jobs and
 builds a published image, so a job from another repo could read or poison that state. On a plan with
 custom runner groups, move it to a group limited to BIBGSystem (`runnerGroup:` in its yaml).
 
@@ -23,13 +42,17 @@ Requirements: Ubuntu x86_64, ~16 GiB RAM, sudo, outbound HTTPS. Nothing else nee
 ```bash
 git clone https://github.com/Association-of-stupid-people/ci-runners.git
 cd ci-runners
-sudo bash bootstrap.sh   # k3s + helm + ARC controller (skips what is already installed)
-sudo bash install.sh     # scale sets; asks for the GitHub PAT the first time
+# edit config.env first when the runners are for another org/repo
+sudo bash setup.sh       # = bootstrap.sh (k3s + helm + ARC controller) + install.sh (scale sets)
 ```
 
-The PAT is a classic token with `admin:org`, from an org owner. It is stored only in the k8s
+`setup.sh` asks for the GitHub PAT the first time. Both steps can also be run on their own; re-running
+is safe (installed parts are skipped, scale sets are upgraded in place).
+
+The PAT is a classic token with `admin:org` from an org owner (for a repo URL: `repo` scope from a repo
+admin). It is stored only in the k8s
 secret `arc-github` (namespace `arc-runners`). Never commit it. Over ssh, give the prompt a terminal:
-`ssh -t <host> 'cd ci-runners && sudo bash install.sh'`. `GH_PAT=... sudo -E bash install.sh` is for
+`ssh -t <host> 'cd ci-runners && sudo bash setup.sh'`. `GH_PAT=... sudo -E bash setup.sh` is for
 automation only (the token lands in shell history).
 
 `helm`/`kubectl` without sudo use the `~/.kube/config` that `bootstrap.sh` copies for the invoking user,
@@ -41,7 +64,7 @@ via `KUBECONFIG` in `~/.bashrc` (open a new shell or `source ~/.bashrc` after bo
 ```yaml
 jobs:
   build:
-    runs-on: bibg-light
+    runs-on: ci-4c-8g
 ```
 
 - **Private repos only by default.** The org runner group `Default` does not allow public repos.
@@ -49,7 +72,9 @@ jobs:
   Check access under *Org settings → Actions → Runner groups*.
 - **The runner image is bare** (`ghcr.io/actions/actions-runner`): no Node, Python, Rust, etc.
   Use `actions/setup-*` or run the job in a `container:`.
-- **Capacity is shared by the whole org.** Jobs beyond `maxRunners` wait in the queue.
+- **Capacity is shared by the whole org.** Jobs that do not fit in the free cores and memory wait in the queue.
+- **Choose the smallest size that works.** A job killed by OOM (exit code 137 or "runner lost") needs the
+  next size up.
 
 ## Operations
 
@@ -73,9 +98,10 @@ kubectl -n arc-systems delete pod -l app.kubernetes.io/component=runner-scale-se
 
 **Add a scale set:** copy a file in `scale-sets/`, change `runnerScaleSetName` (keep the file name
 equal to it) and the limits, run `install.sh`. Every `*.yaml` in that folder becomes a live scale set.
-Keep the sum of memory limits within the host.
+For a new size of the fresh-pod kind, add it to `CI_SIZES` instead (see "How sizes share the machine").
 
-**Remove a scale set:** delete its file, then `helm uninstall <name> -n arc-runners`.
+**Remove a scale set:** delete its file (or its size from `CI_SIZES`), then
+`helm uninstall <name> -n arc-runners`.
 
 **Upgrade ARC** (helm never upgrades CRDs, so the controller is reinstalled): wait until no job is
 running, then
@@ -83,7 +109,8 @@ running, then
 ```bash
 (
   set -e   # stop at the first failure: CRDs must not be deleted while ARC is still installed
-  for s in scale-sets/*.yaml; do helm uninstall "$(basename "$s" .yaml)" -n arc-runners --wait --ignore-not-found; done
+  rs=$(helm list -a -n arc-runners -q)
+  for r in $rs; do helm uninstall "$r" -n arc-runners --wait; done
   helm uninstall arc -n arc-systems --wait --ignore-not-found
   kubectl get crd -o name | grep actions.github.com | xargs -r kubectl delete
 )

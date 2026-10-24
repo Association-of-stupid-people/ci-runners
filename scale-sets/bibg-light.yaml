@@ -1,7 +1,6 @@
 # Runner scale set `bibg-light`: general jobs, up to two at once.
 # Every pod is fresh (own Docker daemon, empty data dir); only the npm cache is shared on the host.
 # Install/upgrade with install.sh on the runner host.
-githubConfigUrl: https://github.com/Association-of-stupid-people
 githubConfigSecret: arc-github
 runnerScaleSetName: bibg-light
 minRunners: 0

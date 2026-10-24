@@ -1,0 +1,65 @@
+# Template for the ci-<C>c-<G>g scale sets. install.sh sets the name, maxRunners and the pod's resources from
+# CI_SIZES. CPU and memory are set at pod level (shared by the runner and its Docker daemon) with request = limit,
+# so the scheduler only starts a job pod where its cores and memory are really free, and the pod is Guaranteed.
+# Disk volumes have a sizeLimit: a pod whose workspace or Docker data grows past it is evicted alone (its job
+# fails) before the node hits disk pressure and evicts every pod; that assumes free disk of roughly
+# maxRunners x 40 GiB plus images.
+# Every pod is fresh (own Docker daemon, empty data dir); nothing is kept between jobs.
+githubConfigSecret: arc-github
+minRunners: 0
+
+template:
+  spec:
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+      - name: dind
+        image: docker:29-dind
+        restartPolicy: Always
+        # Pod network (flannel) has MTU 1450; Docker's bridges default to 1500, so large packets from job
+        # containers (e.g. git fetch) are dropped and connections reset. Match the pod MTU on every network.
+        args: ["dockerd", "--host=unix:///var/run/docker.sock", "--group=123", "--mtu=1450",
+               "--default-network-opt=bridge=com.docker.network.driver.mtu=1450"]
+        securityContext:
+          privileged: true
+        startupProbe:
+          exec:
+            command: ["docker", "info"]
+          failureThreshold: 24
+          periodSeconds: 5
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+          - name: docker-data
+            mountPath: /var/lib/docker
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+    volumes:
+      - name: work
+        emptyDir: { sizeLimit: 10Gi }
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+      - name: docker-data
+        emptyDir: { sizeLimit: 30Gi }
